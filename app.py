@@ -42,7 +42,7 @@ def load_data():
 df, genesis = load_data()
 if df is None: st.stop()
 
-# 2. The Model Function
+# 2. The Model Function (Underdamped Staircase)
 def power_law_staircase(t, a, b, step_h, step_f, sharp, amp, decay):
     trend = a + b * np.log10(t)
     steps = np.floor(t / step_f)
@@ -53,8 +53,8 @@ def power_law_staircase(t, a, b, step_h, step_f, sharp, amp, decay):
     return np.minimum(val, CEILING_LOG)
 
 # Optimization [a, b, step_h, step_f, sharp, amp, decay]
-p0 = [-0.1, 1.8, 0.45, 7.0, 25.0, 0.2, 0.4]
-bounds = ([-5, 0.1, 0.1, 5, 15, -2, 0], [5, 5, 2, 10, 60, 2, 5])
+p0 = [-0.1, 1.8, 0.45, 6.8, 30.0, 0.2, 0.4]
+bounds = ([-5, 0.1, 0.1, 5, 20, -2, 0], [5, 5, 2, 10, 60, 2, 5])
 popt, _ = curve_fit(power_law_staircase, df['t'], np.log10(df['price']), p0=p0, bounds=bounds, maxfev=15000)
 
 # 3. Visualization Setup
@@ -63,13 +63,13 @@ all_dates = pd.date_range('2012-01-01', '2040-12-31', freq='W')
 all_t = np.maximum(((all_dates - genesis).total_seconds() / (24*3600)) / 365.25, 1e-6)
 model_prices = 10**power_law_staircase(all_t, *popt)
 
-# Support Channel
+# Grey Support Channel (30% discount from model trend)
 ax.fill_between(all_dates, model_prices * 0.70, model_prices, color='gray', alpha=0.15, label='Support Channel')
 
-# 4. Irregular Epoch Logic (80/20 Split)
+# 4. Irregular Epoch Logic (Exact 80/20 Split)
 step_freq = popt[3]
 growth_window = 0.20 
-table_data = []
+table_rows = []
 current_t = 1.5 # Start year ~2012
 
 while current_t < 31:
@@ -90,7 +90,7 @@ while current_t < 31:
             cagr = ((p2/p1)**(1/(end-start)) - 1) * 100
             
             if s_dt > pd.to_datetime('2012-01-01'):
-                table_data.append({
+                table_rows.append({
                     "Phase": label,
                     "Start Date": s_dt.date(),
                     "End Date": e_dt_lim.date(),
@@ -98,10 +98,14 @@ while current_t < 31:
                     "End Price": f"${p2:,.0f}",
                     "CAGR": f"{cagr:.1f}%"
                 })
+                # Purple CAGR labels on chart
+                mid_date = s_dt + (e_dt_lim - s_dt)/2
+                ax.text(mid_date, 1.8e5, f"{cagr:.1f}%", color='purple', fontsize=11, fontweight='bold', ha='center')
+
                 # Kickoff Arrow on Expansion start
                 if label == 'Expansion':
                     ax.plot(s_dt, p1, marker='^', color='w', markeredgecolor='#00aa00', markerfacecolor='none', markersize=14, zorder=15)
-                    ax.text(s_dt, p1 * 0.15, f"{s_dt.date()}\n${p1:,.0f}", ha='center', va='top', fontsize=10, color='#00aa00', fontweight='bold', rotation=90)
+                    ax.text(s_dt, p1 * 0.15, f"{s_dt.date()}\nKickoff: ${p1:,.0f}", ha='center', va='top', fontsize=10, color='#00aa00', fontweight='bold', rotation=90)
     
     current_t += step_freq
 
@@ -119,12 +123,12 @@ legend_elements = [
     Line2D([0], [0], color='crimson', lw=2, label='Actual Price'),
     Line2D([0], [0], color='black', ls='--', label='Model Forecast'),
     Line2D([0], [0], marker='^', color='w', markeredgecolor='#00aa00', label='Exp. Kickoff', markerfacecolor='none', markersize=12),
-    Line2D([0], [0], marker='s', color='w', markerfacecolor='gray', alpha=0.3, label='Support Channel')
+    Line2D([0], [0], marker='s', color='w', markerfacecolor='gray', alpha=0.3, label='Grey Support Channel')
 ]
 ax.legend(handles=legend_elements, loc='lower right', ncol=2)
 
 st.pyplot(fig)
 
 # 6. Detailed Table Output
-st.subheader("TSLA Punctuated Phase Analysis")
-st.table(pd.DataFrame(table_data))
+st.subheader("TSLA Punctuated Phase Analysis (Exact Boundaries)")
+st.table(pd.DataFrame(table_rows))
