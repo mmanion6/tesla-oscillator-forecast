@@ -6,111 +6,71 @@ import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
 import yfinance as yf
 from scipy.optimize import curve_fit
-from datetime import datetime
 
-# Page Config
+# 1. Setup
 st.set_page_config(page_title="TSLA Oscillator Forecast", layout="wide")
 
-# Hide Streamlit Header/Footer
-hide_style = """<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}</style>"""
-st.markdown(hide_style, unsafe_allow_html=True)
-
-st.title("Tesla Damped-Oscillator Model")
-st.caption("Historical Cycles & Forecast (2012–2040) • Logarithmic Regression")
-
-# ====================== DATA LOADING ======================
+# 2. Robust Data Loading
 @st.cache_data(ttl=86400)
 def load_data():
-    df = yf.download('TSLA', period='max', interval='1d', progress=False)
-    # Ensure we handle multi-index columns if yfinance returns them
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    try:
+        ticker = yf.Ticker("TSLA")
+        df = ticker.history(period="max")
         
-    df = df[['Close']].reset_index()
-    df.columns = ['timestamp', 'price']
-    df = df.dropna(subset=['price']).reset_index(drop=True)
-    
-    genesis = pd.to_datetime('2010-06-29')
-    # ADD + 1e-6 HERE: This prevents ln(0) which causes the ValueError
-    df['t'] = ((df['timestamp'] - genesis).dt.total_seconds() / (24 * 3600 * 365.25)) + 1e-6
-    df['log_price'] = np.log10(df['price'])
-    return df, genesis
+        if df.empty:
+            return None, None
+            
+        df = df[['Close']].reset_index()
+        df.columns = ['timestamp', 'price']
+        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_localize(None)
+        
+        genesis = pd.to_datetime('2010-06-29')
+        # + 1e-6 prevents ln(0) errors in the math model
+        df['t'] = ((df['timestamp'] - genesis).dt.total_seconds() / (24 * 3600 * 365.25)) + 1e-6
+        df['log_price'] = np.log10(df['price'])
+        return df, genesis
+    except Exception as e:
+        st.error(f"Data Fetch Error: {e}")
+        return None, None
 
-# ====================== MODELING ======================
+df, genesis = load_data()
+
+if df is None or df.empty:
+    st.error("⚠️ Could not fetch data from Yahoo Finance. Please check your internet or try again later.")
+    st.stop()
+
+# 3. The Model
 def damped_osc(t, a, b, A, gamma, omega, phi):
-    # a + b*ln(t) provides the growth curve; the rest is the sine wave decay
     return a + b * np.log(t) + A * np.exp(-gamma * t) * np.sin(omega * t + phi)
 
-# Fit the model
+# Optimization
 p0 = [-2.0, 2.5, 0.3, 0.01, 1.57, 0.0]
 bounds = ([-10, 0.1, -2, 0.0001, 0.1, -np.pi], [5, 10, 2, 0.5, 10, np.pi])
 
-popt, _ = curve_fit(damped_osc, df['t'], df['log_price'], p0=p0, bounds=bounds, maxfev=10000)
-a, b, A, gamma, omega, phi = popt
+try:
+    popt, _ = curve_fit(damped_osc, df['t'], df['log_price'], p0=p0, bounds=bounds, maxfev=10000)
+except ValueError as e:
+    st.error(f"Model fitting failed: {e}. Try adjusting the IPO date or initial parameters.")
+    st.stop()
 
-# ====================== FORECAST GENERATION ======================
-chart_start = pd.to_datetime('2012-01-01')
-chart_end = pd.to_datetime('2040-12-31')
-all_dates = pd.date_range(chart_start, chart_end, freq='D')
+# 4. Forecast Calculations
+all_dates = pd.date_range('2012-01-01', '2040-12-31', freq='D')
 all_t = ((all_dates - genesis).total_seconds() / (24*3600)) / 365.25
+all_t = np.maximum(all_t, 1e-6) # Safety for log calculations
 
-pred_log_price = damped_osc(all_t, *popt)
-all_pred_price = 10 ** pred_log_price
-all_osc = A * np.exp(-gamma * all_t) * np.sin(omega * all_t + phi)
-all_trend = 10 ** (a + b * np.log(all_t))
+pred_price = 10 ** damped_osc(all_t, *popt)
+osc_component = popt[2] * np.exp(-popt[3] * all_t) * np.sin(popt[4] * all_t + popt[5])
 
-# Threshold for Buy/ATH zones
-thresh = 0.20 * np.abs(A * np.exp(-gamma * all_t))
+# 5. UI & Plotting
+st.title("Tesla Damped-Oscillator Forecast")
 
-all_df = pd.DataFrame({
-    'timestamp': all_dates,
-    'pred_price': all_pred_price,
-    'osc': all_osc,
-    'regime': np.where(all_osc < -thresh, 'buy', 
-              np.where(all_osc > thresh, 'ath', 'consolidation')),
-    'is_hist': all_dates <= df['timestamp'].max()
-})
+fig, ax = plt.subplots(figsize=(12, 6))
+ax.plot(df['timestamp'], df['price'], color='crimson', label='Actual Price', alpha=0.8)
+ax.plot(all_dates, pred_price, color='royalblue', linestyle='--', label='Model Forecast', alpha=0.6)
 
-# ====================== VISUALIZATION ======================
-def create_plot():
-    fig, ax = plt.subplots(figsize=(14, 8))
-    
-    # Background Shading
-    colors = {'buy': '#d4f4d4', 'consolidation': '#e0f0ff', 'ath': '#ffe6cc'}
-    for regime, color in colors.items():
-        mask = all_df['regime'] == regime
-        ax.fill_between(all_df['timestamp'], 0.1, all_df['pred_price']*10, 
-                        where=mask, color=color, alpha=0.5, zorder=1)
+ax.set_yscale('log')
+ax.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f'${x:,.0f}'))
+ax.legend()
+ax.grid(True, which="both", alpha=0.2)
 
-    # Actual Price
-    ax.plot(df['timestamp'], df['price'], color='crimson', label='Actual Price', linewidth=1.5, zorder=10)
-    
-    # Model Lines
-    hist = all_df[all_df['is_hist']]
-    fut = all_df[~all_df['is_hist']]
-    
-    ax.plot(hist['timestamp'], hist['pred_price'], color='black', linestyle='--', alpha=0.3, label='Model Fit')
-    ax.plot(fut['timestamp'], fut['pred_price'], color='blue', linewidth=2, label='Model Forecast')
-    
-    # Formatting
-    ax.set_yscale('log')
-    ax.set_ylim(df['price'].min() * 0.8, all_pred_price.max() * 1.2)
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f'${x:,.0f}'))
-    ax.set_xlim(chart_start, chart_end)
-    
-    ax.grid(True, which='both', linestyle='--', alpha=0.2)
-    ax.legend(loc='lower right', frameon=True)
-    ax.set_title(f"TSLA Price vs Damped Oscillator (Projected Cycle: {2*np.pi/omega:.1f} yrs)")
-    
-    plt.tight_layout()
-    return fig
-
-st.pyplot(create_plot())
-
-# Equation Display
-st.divider()
-st.latex(r"P(t) = 10^{a + b \ln(t) + A e^{-\gamma t} \sin(\omega t + \phi)}")
-col1, col2, col3 = st.columns(3)
-col1.metric("Damping (γ)", f"{gamma:.4f}")
-col2.metric("Cycle Length", f"{2*np.pi/omega:.2f} Years")
-col3.metric("Current Regime", all_df.iloc[len(hist)]['regime'].upper())
+st.pyplot(fig)
