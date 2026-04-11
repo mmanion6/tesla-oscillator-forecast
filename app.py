@@ -22,16 +22,19 @@ st.caption("Historical Cycles & Forecast (2012–2040) • Logarithmic Regressio
 @st.cache_data(ttl=86400)
 def load_data():
     df = yf.download('TSLA', period='max', interval='1d', progress=False)
+    # Ensure we handle multi-index columns if yfinance returns them
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+        
     df = df[['Close']].reset_index()
     df.columns = ['timestamp', 'price']
     df = df.dropna(subset=['price']).reset_index(drop=True)
     
     genesis = pd.to_datetime('2010-06-29')
-    df['t'] = (df['timestamp'] - genesis).dt.total_seconds() / (24 * 3600 * 365.25)
+    # ADD + 1e-6 HERE: This prevents ln(0) which causes the ValueError
+    df['t'] = ((df['timestamp'] - genesis).dt.total_seconds() / (24 * 3600 * 365.25)) + 1e-6
     df['log_price'] = np.log10(df['price'])
     return df, genesis
-
-df, genesis = load_data()
 
 # ====================== MODELING ======================
 def damped_osc(t, a, b, A, gamma, omega, phi):
